@@ -808,6 +808,17 @@ public abstract class CommonConnectorConfig {
                     "This doesn't affect the snapshot events' values, but the schema of snapshot events may have outdated defaults.")
             .withDefault(Boolean.FALSE);
 
+    public static final Field INCREMENTAL_SNAPSHOT_FAIL_ON_ERROR = Field.create("incremental.snapshot.fail.on.error")
+            .withDisplayName("Fail connector on incremental snapshot read errors")
+            .withType(Type.BOOLEAN)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("When true, an error while reading an incremental snapshot chunk fails the connector "
+                    + "so that the snapshot resumes from the last committed chunk after a restart. "
+                    + "When false (the default), the failing table is skipped and streaming continues, "
+                    + "and the table must be re-signalled to be snapshotted again.")
+            .withDefault(Boolean.FALSE);
+
     public static final Field SNAPSHOT_MODE_TABLES = Field.create("snapshot.include.collection.list")
             .withDisplayName("Snapshot mode include data collection")
             .withType(Type.LIST)
@@ -1621,6 +1632,7 @@ public abstract class CommonConnectorConfig {
     private final int snapshotFetchSize;
     private final int incrementalSnapshotChunkSize;
     private final boolean incrementalSnapshotAllowSchemaChanges;
+    private final boolean incrementalSnapshotFailOnError;
     private final int snapshotMaxThreads;
     private final int snapshotMaxThreadsMultiplier;
     private final boolean legacySnapshotMaxThreads;
@@ -1687,6 +1699,7 @@ public abstract class CommonConnectorConfig {
         this.queryFetchSize = config.getInteger(QUERY_FETCH_SIZE);
         this.incrementalSnapshotChunkSize = config.getInteger(INCREMENTAL_SNAPSHOT_CHUNK_SIZE);
         this.incrementalSnapshotAllowSchemaChanges = config.getBoolean(INCREMENTAL_SNAPSHOT_ALLOW_SCHEMA_CHANGES);
+        this.incrementalSnapshotFailOnError = config.getBoolean(INCREMENTAL_SNAPSHOT_FAIL_ON_ERROR);
         this.schemaNameAdjustmentMode = SchemaNameAdjustmentMode.parse(config.getString(SCHEMA_NAME_ADJUSTMENT_MODE));
         this.fieldNameAdjustmentMode = FieldNameAdjustmentMode.parse(config.getString(FIELD_NAME_ADJUSTMENT_MODE));
         this.eventConvertingFailureHandlingMode = EventConvertingFailureHandlingMode.parse(config.getString(EVENT_CONVERTING_FAILURE_HANDLING_MODE));
@@ -1897,6 +1910,10 @@ public abstract class CommonConnectorConfig {
 
     public int getIncrementalSnapshotChunkSize() {
         return incrementalSnapshotChunkSize;
+    }
+
+    public boolean isIncrementalSnapshotFailOnError() {
+        return incrementalSnapshotFailOnError;
     }
 
     public String getNotificationTopic() {

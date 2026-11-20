@@ -296,6 +296,9 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
                         if (e instanceof SQLNonTransientConnectionException) {
                             closeJdbcConnection();
                         }
+                        if (connectorConfig.isIncrementalSnapshotFailOnError()) {
+                            throw new DebeziumException("Failed to read maximum key for table " + currentTableId, e);
+                        }
                         LOGGER.error("Failed to read maximum key for table {}", currentTableId, e);
                         notificationService.incrementalSnapshotNotificationService().notifyTableScanCompleted(context, partition, offsetContext, totalRowsScanned,
                                 SQL_EXCEPTION);
@@ -349,6 +352,9 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
                     if (e instanceof SQLNonTransientConnectionException) {
                         closeJdbcConnection();
                     }
+                    if (connectorConfig.isIncrementalSnapshotFailOnError()) {
+                        throw new DebeziumException("Failed to read incremental snapshot chunk for table " + currentTableId, e);
+                    }
                     notificationService.incrementalSnapshotNotificationService().notifyTableScanCompleted(context, partition, offsetContext, totalRowsScanned,
                             SQL_EXCEPTION);
                     nextDataCollection(partition, offsetContext);
@@ -361,6 +367,10 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
             if (e instanceof SQLNonTransientConnectionException) {
                 closeJdbcConnection();
             }
+            if (connectorConfig.isIncrementalSnapshotFailOnError()) {
+                throw new DebeziumException("SQL error while executing incremental snapshot for table '%s'"
+                        .formatted(context.currentDataCollectionId().getId()), e);
+            }
             warnAndSkip(partition, offsetContext,
                     SQL_EXCEPTION,
                     "SQL error while executing incremental snapshot for table '%s', skipping and continuing streaming"
@@ -368,6 +378,15 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
                     e);
         }
         catch (Exception e) {
+            if (connectorConfig.isIncrementalSnapshotFailOnError()) {
+                if (e instanceof InterruptedException interruptedException) {
+                    throw interruptedException;
+                }
+                throw e instanceof DebeziumException debeziumException
+                        ? debeziumException
+                        : new DebeziumException("Error while executing incremental snapshot for table '%s'"
+                                .formatted(context.currentDataCollectionId().getId()), e);
+            }
             warnAndSkip(partition, offsetContext,
                     SQL_EXCEPTION,
                     "Error while executing incremental snapshot for table '%s', skipping and continuing streaming".formatted(context.currentDataCollectionId().getId()),

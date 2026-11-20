@@ -2243,6 +2243,15 @@ Increasing the chunk size provides greater efficiency, because the snapshot runs
 However, larger chunk sizes also require more memory to buffer the snapshot data.
 Adjust the chunk size to a value that provides the best performance in your environment.
 
+|[[mongodb-property-incremental-snapshot-fail-on-error]]<<mongodb-property-incremental-snapshot-fail-on-error, `+incremental.snapshot.fail.on.error+`>>
+|`false`
+|Specifies how the connector handles an error while it reads an incremental snapshot chunk. +
+By default, the connector logs the error, skips the remaining chunks of the affected collection, and continues streaming.
+The skipped collection is considered fully snapshotted, and is not captured again unless you send a new signal to trigger another snapshot. +
+Set this property to `true` to have the connector fail instead of skipping the collection.
+After the connector restarts, the incremental snapshot resumes from the last successfully committed chunk.
+Enable this option if the incremental snapshot must be guaranteed to complete, for example, when you use it to backfill data. +
+
 
 |[[mongodb-property-incremental-snapshot-watermarking-strategy]]<<mongodb-property-incremental-snapshot-watermarking-strategy, `+incremental.snapshot.watermarking.strategy+`>>
 |`insert_insert`

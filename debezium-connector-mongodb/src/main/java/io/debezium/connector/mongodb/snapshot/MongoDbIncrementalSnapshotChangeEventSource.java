@@ -358,6 +358,15 @@ public class MongoDbIncrementalSnapshotChangeEventSource
             emitWindowClose(partition, offsetContext);
         }
         catch (Exception e) {
+            if (connectorConfig.isIncrementalSnapshotFailOnError()) {
+                if (e instanceof InterruptedException interruptedException) {
+                    throw interruptedException;
+                }
+                throw e instanceof DebeziumException debeziumException
+                        ? debeziumException
+                        : new DebeziumException("Error while executing incremental snapshot for collection '%s'"
+                                .formatted(context.currentDataCollectionId().getId()), e);
+            }
             warnAndSkip(partition, offsetContext,
                     "Error while executing incremental snapshot for collection '%s', skipping and continuing streaming"
                             .formatted(context.currentDataCollectionId().getId()),

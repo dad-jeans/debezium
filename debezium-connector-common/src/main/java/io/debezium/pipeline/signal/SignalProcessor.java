@@ -288,6 +288,9 @@ public class SignalProcessor<P extends Partition, O extends OffsetContext> {
             Thread.currentThread().interrupt();
         }
         catch (Exception e) {
+            if (connectorConfig.isIncrementalSnapshotFailOnError() && e instanceof DebeziumException debeziumException) {
+                throw debeziumException;
+            }
             LOGGER.warn("Action {} failed. The signal {} may not have been processed.", signalRecord.getType(), signalRecord, e);
         }
     }

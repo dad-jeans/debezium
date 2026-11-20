@@ -19,6 +19,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -184,6 +185,60 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
         for (int i = 0; i < expectedRecordCount; i++) {
             assertThat(dbChanges).contains(entry(i + 1, i));
         }
+    }
+
+    @Test
+    public void chunkReadErrorSkipsTableByDefault() throws Exception {
+        // Testing.Print.enable();
+
+        final LogInterceptor logInterceptor = new LogInterceptor(AbstractIncrementalSnapshotChangeEventSource.class);
+        populateTable();
+        startConnector();
+
+        sendAdHocSnapshotSignalWithAdditionalConditionsWithSurrogateKey(Map.of(tableDataCollectionId(), "no_such_column = 1"), "", tableDataCollectionId());
+
+        Awaitility.await().atMost(waitTimeForRecords() * 5L, TimeUnit.SECONDS)
+                .until(() -> logInterceptor.containsMessage("Failed to read maximum key for table"));
+
+        // streaming must continue after the failing table was skipped
+        try (JdbcConnection connection = databaseConnection()) {
+            connection.setAutoCommit(false);
+            for (int i = 0; i < 10; i++) {
+                connection.executeWithoutCommitting(String.format("INSERT INTO %s (%s, aa) VALUES (%s, %s)",
+                        tableName(), connection.quoteIdentifier(pkFieldName()), i + ROW_COUNT + 1, i + ROW_COUNT));
+            }
+            connection.commit();
+        }
+
+        final Map<Integer, Integer> dbChanges = consumeMixedWithIncrementalSnapshot(10);
+        for (int i = 0; i < 10; i++) {
+            assertThat(dbChanges).contains(entry(i + ROW_COUNT + 1, i + ROW_COUNT));
+        }
+        assertConnectorIsRunning();
+    }
+
+    @Test
+    public void chunkReadErrorFailsConnectorWhenFailOnErrorEnabled() throws Exception {
+        // Testing.Print.enable();
+
+        populateTable();
+        final CountDownLatch engineStoppedWithError = new CountDownLatch(1);
+        // retries are disabled so that the (retriable) read error fails the engine immediately
+        startConnector(x -> x.with(CommonConnectorConfig.INCREMENTAL_SNAPSHOT_FAIL_ON_ERROR, true)
+                .with(CommonConnectorConfig.MAX_RETRIES_ON_ERROR, 0),
+                (success, message, error) -> {
+                    if (error != null) {
+                        engineStoppedWithError.countDown();
+                    }
+                },
+                true);
+
+        sendAdHocSnapshotSignalWithAdditionalConditionsWithSurrogateKey(Map.of(tableDataCollectionId(), "no_such_column = 1"), "", tableDataCollectionId());
+
+        assertThat(engineStoppedWithError.await(waitTimeForRecords() * 5L, TimeUnit.SECONDS))
+                .describedAs("Connector should fail when an incremental snapshot chunk cannot be read")
+                .isTrue();
+        assertConnectorNotRunning();
     }
 
     @Test
