@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -420,6 +421,35 @@ public class IncrementalSnapshotIT extends AbstractMongoConnectorIT {
 
             assertThat(dbChanges).containsAllEntriesOf(expected);
         }
+    }
+
+    @Test
+    public void chunkReadErrorFailsConnectorWhenFailOnErrorEnabled() throws Exception {
+        // Testing.Print.enable();
+
+        final Document[] documents = new Document[10];
+        for (int i = 0; i < documents.length; i++) {
+            documents[i] = new Document().append(DOCUMENT_ID, i + 1).append(valueFieldName(), i);
+        }
+        insertDocumentsInTx(DATABASE_NAME, COLLECTION_NAME, documents);
+
+        final CountDownLatch engineStoppedWithError = new CountDownLatch(1);
+        // retries are disabled so that the (retriable) read error fails the engine immediately
+        startConnector(x -> x.with(CommonConnectorConfig.INCREMENTAL_SNAPSHOT_FAIL_ON_ERROR, true)
+                .with(CommonConnectorConfig.MAX_RETRIES_ON_ERROR, 0),
+                (success, message, error) -> {
+                    if (error != null) {
+                        engineStoppedWithError.countDown();
+                    }
+                });
+
+        // invalid query operator: the chunk read fails on the server
+        sendAdHocSnapshotSignalWithAdditionalConditions(Map.of(fullDataCollectionName(), "{\\\"$nosuchop\\\": 1}"), fullDataCollectionName());
+
+        assertThat(engineStoppedWithError.await(waitTimeForRecords() * 5L, TimeUnit.SECONDS))
+                .describedAs("Connector should fail when an incremental snapshot chunk cannot be read")
+                .isTrue();
+        assertConnectorNotRunning();
     }
 
     @Test
