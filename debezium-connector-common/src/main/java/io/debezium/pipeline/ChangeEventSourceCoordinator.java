@@ -373,6 +373,7 @@ public class ChangeEventSourceCoordinator<P extends Partition, O extends OffsetC
                     CommonConnectorConfig.SIGNAL_DATA_COLLECTION.name());
         }
         eventDispatcher.setIncrementalSnapshotChangeEventSource(incrementalSnapshotChangeEventSource);
+        incrementalSnapshotChangeEventSource.ifPresent(x -> x.setFailureHandler(errorHandler, this::requestStop));
         incrementalSnapshotChangeEventSource.ifPresent(x -> x.init(partition, offsetContext));
     }
 
@@ -399,6 +400,15 @@ public class ChangeEventSourceCoordinator<P extends Partition, O extends OffsetC
         catch (Throwable e) {
             errorHandler.setProducerThrowable(e);
         }
+    }
+
+    /**
+     * Requests that the change event sources stop, without shutting down this coordinator. Unlike {@link #stop()},
+     * this is safe to call from any thread, including the coordinator's own executor thread; the full shutdown
+     * is still performed by the runtime via {@link #stop()}.
+     */
+    public void requestStop() {
+        running = false;
     }
 
     /**

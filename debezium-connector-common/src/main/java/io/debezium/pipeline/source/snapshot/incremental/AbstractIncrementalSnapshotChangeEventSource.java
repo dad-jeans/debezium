@@ -38,6 +38,7 @@ import io.debezium.annotation.NotThreadSafe;
 import io.debezium.data.SpecialValueDecimal;
 import io.debezium.data.ValueWrapper;
 import io.debezium.jdbc.JdbcConnection;
+import io.debezium.pipeline.ErrorHandler;
 import io.debezium.pipeline.EventDispatcher;
 import io.debezium.pipeline.notification.IncrementalSnapshotNotificationService.TableScanCompletionStatus;
 import io.debezium.pipeline.notification.NotificationService;
@@ -92,6 +93,10 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
     protected final Map<Struct, Object[]> window = new LinkedHashMap<>();
     protected final NotificationService<P, ? extends OffsetContext> notificationService;
 
+    private ErrorHandler errorHandler;
+    private Runnable stopRequester = () -> {
+    };
+
     public AbstractIncrementalSnapshotChangeEventSource(RelationalDatabaseConnectorConfig config,
                                                         JdbcConnection jdbcConnection,
                                                         EventDispatcher<P, T> dispatcher,
@@ -109,6 +114,12 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
         this.progressListener = progressListener;
         this.dataListener = dataChangeEventListener;
         this.notificationService = notificationService;
+    }
+
+    @Override
+    public void setFailureHandler(ErrorHandler errorHandler, Runnable stopRequester) {
+        this.errorHandler = errorHandler;
+        this.stopRequester = stopRequester;
     }
 
     @Override
@@ -297,7 +308,7 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
                             closeJdbcConnection();
                         }
                         if (connectorConfig.isIncrementalSnapshotFailOnError()) {
-                            throw new DebeziumException("Failed to read maximum key for table " + currentTableId, e);
+                            failIncrementalSnapshot(partition, offsetContext, SQL_EXCEPTION, "Failed to read maximum key for table " + currentTableId, e);
                         }
                         LOGGER.error("Failed to read maximum key for table {}", currentTableId, e);
                         notificationService.incrementalSnapshotNotificationService().notifyTableScanCompleted(context, partition, offsetContext, totalRowsScanned,
@@ -353,7 +364,8 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
                         closeJdbcConnection();
                     }
                     if (connectorConfig.isIncrementalSnapshotFailOnError()) {
-                        throw new DebeziumException("Failed to read incremental snapshot chunk for table " + currentTableId, e);
+                        failIncrementalSnapshot(partition, offsetContext, SQL_EXCEPTION,
+                                "Failed to read incremental snapshot chunk for table " + currentTableId, e);
                     }
                     notificationService.incrementalSnapshotNotificationService().notifyTableScanCompleted(context, partition, offsetContext, totalRowsScanned,
                             SQL_EXCEPTION);
@@ -368,7 +380,7 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
                 closeJdbcConnection();
             }
             if (connectorConfig.isIncrementalSnapshotFailOnError()) {
-                throw new DebeziumException("SQL error while executing incremental snapshot for table '%s'"
+                failIncrementalSnapshot(partition, offsetContext, SQL_EXCEPTION, "SQL error while executing incremental snapshot for table '%s'"
                         .formatted(context.currentDataCollectionId().getId()), e);
             }
             warnAndSkip(partition, offsetContext,
@@ -382,10 +394,8 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
                 if (e instanceof InterruptedException interruptedException) {
                     throw interruptedException;
                 }
-                throw e instanceof DebeziumException debeziumException
-                        ? debeziumException
-                        : new DebeziumException("Error while executing incremental snapshot for table '%s'"
-                                .formatted(context.currentDataCollectionId().getId()), e);
+                failIncrementalSnapshot(partition, offsetContext, SQL_EXCEPTION, "Error while executing incremental snapshot for table '%s'"
+                        .formatted(context.currentDataCollectionId().getId()), e);
             }
             warnAndSkip(partition, offsetContext,
                     SQL_EXCEPTION,
@@ -400,6 +410,25 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
         }
     }
 
+    /**
+     * Fails the connector instead of skipping the current table, when 'incremental.snapshot.fail.on.error' is
+     * enabled. Reports the failure to the runtime through the error handler, asks the streaming loop to stop
+     * cooperatively, and throws to unwind the current call stack, so the failure is fatal no matter which thread
+     * the chunk read ran on. The snapshot state is deliberately left untouched, so the last committed offsets
+     * remain a valid resume point after a restart.
+     */
+    private void failIncrementalSnapshot(P partition, OffsetContext offsetContext, TableScanCompletionStatus status, String message,
+                                         Exception cause) {
+        notificationService.incrementalSnapshotNotificationService().notifyTableScanCompleted(context, partition, offsetContext, totalRowsScanned,
+                status);
+        DebeziumException failure = new DebeziumException(message, cause);
+        if (errorHandler != null) {
+            errorHandler.setProducerThrowable(failure);
+        }
+        stopRequester.run();
+        throw failure;
+    }
+
     private boolean isTableInvalid(P partition, OffsetContext offsetContext) {
         final TableId currentTableId = (TableId) context.currentDataCollectionId().getId();
         currentTable = databaseSchema.tableFor(currentTableId);
@@ -410,12 +439,20 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
                 retrieveAndRefreshSchema(currentTableId, partition, offsetContext);
                 currentTable = databaseSchema.tableFor(currentTableId);
                 if (currentTable == null) {
+                    if (connectorConfig.isIncrementalSnapshotFailOnError()) {
+                        failIncrementalSnapshot(partition, offsetContext, UNKNOWN_SCHEMA,
+                                "Schema retrieval failed to populate the schema as expected for %s".formatted(currentTableId), null);
+                    }
                     warnAndSkip(partition, offsetContext, UNKNOWN_SCHEMA,
                             "Schema retrieval failed to populate the schema as expected for %s".formatted(currentTableId), null);
                     return true;
                 }
             }
             catch (Exception e) {
+                if (connectorConfig.isIncrementalSnapshotFailOnError()) {
+                    failIncrementalSnapshot(partition, offsetContext, UNKNOWN_SCHEMA,
+                            "Schema retrieval failed due to an exception for %s".formatted(currentTableId), e);
+                }
                 warnAndSkip(partition, offsetContext, UNKNOWN_SCHEMA,
                         "Schema retrieval failed due to an exception for %s".formatted(currentTableId), e);
                 return true;
@@ -423,6 +460,10 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
         }
         currentTable = chunkQueryBuilder.prepareTable(context, currentTable);
         if (chunkQueryBuilder.getQueryColumns(context, currentTable).isEmpty()) {
+            if (connectorConfig.isIncrementalSnapshotFailOnError()) {
+                failIncrementalSnapshot(partition, offsetContext, NO_PRIMARY_KEY,
+                        "Incremental snapshot for table '%s' cannot run because the table has no primary keys".formatted(currentTableId), null);
+            }
             warnAndSkip(partition, offsetContext, NO_PRIMARY_KEY,
                     "Incremental snapshot for table '%s' skipped because the table has no primary keys".formatted(currentTableId), null);
             return true;

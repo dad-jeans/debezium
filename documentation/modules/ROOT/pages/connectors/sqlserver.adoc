@@ -3385,7 +3385,7 @@ Adjust the chunk size to a value that provides the best performance in your envi
 By default, the connector logs the error, skips the remaining chunks of the affected table, and continues streaming.
 The skipped table is considered fully snapshotted, and is not captured again unless you send a new signal to trigger another snapshot. +
 Set this property to `true` to have the connector fail instead of skipping the table.
-After the connector restarts, the incremental snapshot resumes from the last successfully committed chunk.
+Failures are handled by the connector's standard error handling and restart machinery (see `errors.max.retries`); after a restart, the incremental snapshot resumes from the last successfully committed chunk.
 Enable this option if the incremental snapshot must be guaranteed to complete, for example, when you use it to backfill data.
 
 |[[sqlserver-property-incremental-snapshot-watermarking-strategy]]<<sqlserver-property-incremental-snapshot-watermarking-strategy, `+incremental.snapshot.watermarking.strategy+`>>

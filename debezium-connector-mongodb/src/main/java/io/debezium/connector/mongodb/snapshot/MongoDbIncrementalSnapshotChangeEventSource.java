@@ -51,6 +51,7 @@ import io.debezium.connector.mongodb.MongoDbTaskContext;
 import io.debezium.connector.mongodb.connection.MongoDbConnection;
 import io.debezium.connector.mongodb.connection.MongoDbConnections;
 import io.debezium.connector.mongodb.recordemitter.MongoDbSnapshotRecordEmitter;
+import io.debezium.pipeline.ErrorHandler;
 import io.debezium.pipeline.EventDispatcher;
 import io.debezium.pipeline.notification.NotificationService;
 import io.debezium.pipeline.signal.SignalPayload;
@@ -99,6 +100,10 @@ public class MongoDbIncrementalSnapshotChangeEventSource
 
     protected final NotificationService<MongoDbPartition, ? extends OffsetContext> notificationService;
 
+    private ErrorHandler errorHandler;
+    private Runnable stopRequester = () -> {
+    };
+
     /**
      * Created on demand by {@link #incrementalSnapshotThreadPool()} and shut down once the snapshot completes, so a
      * connector that never runs an incremental snapshot does not hold on to any threads.
@@ -123,6 +128,12 @@ public class MongoDbIncrementalSnapshotChangeEventSource
         this.signallingCollectionId = connectorConfig.getSignalingDataCollectionIds().isEmpty() ? null
                 : CollectionId.parse(connectorConfig.getSignalingDataCollectionIds().get(0));
         this.notificationService = notificationService;
+    }
+
+    @Override
+    public void setFailureHandler(ErrorHandler errorHandler, Runnable stopRequester) {
+        this.errorHandler = errorHandler;
+        this.stopRequester = stopRequester;
     }
 
     private synchronized ExecutorService incrementalSnapshotThreadPool() {
@@ -362,10 +373,8 @@ public class MongoDbIncrementalSnapshotChangeEventSource
                 if (e instanceof InterruptedException interruptedException) {
                     throw interruptedException;
                 }
-                throw e instanceof DebeziumException debeziumException
-                        ? debeziumException
-                        : new DebeziumException("Error while executing incremental snapshot for collection '%s'"
-                                .formatted(context.currentDataCollectionId().getId()), e);
+                failIncrementalSnapshot(partition, offsetContext, "Error while executing incremental snapshot for collection '%s'"
+                        .formatted(context.currentDataCollectionId().getId()), e);
             }
             warnAndSkip(partition, offsetContext,
                     "Error while executing incremental snapshot for collection '%s', skipping and continuing streaming"
@@ -378,6 +387,24 @@ public class MongoDbIncrementalSnapshotChangeEventSource
                 postIncrementalSnapshotCompleted();
             }
         }
+    }
+
+    /**
+     * Fails the connector instead of skipping the current collection, when 'incremental.snapshot.fail.on.error' is
+     * enabled. Reports the failure to the runtime through the error handler, asks the streaming loop to stop
+     * cooperatively, and throws to unwind the current call stack, so the failure is fatal no matter which thread
+     * the chunk read ran on. The snapshot state is deliberately left untouched, so the last committed offsets
+     * remain a valid resume point after a restart.
+     */
+    private void failIncrementalSnapshot(MongoDbPartition partition, OffsetContext offsetContext, String message, Exception cause) {
+        notificationService.incrementalSnapshotNotificationService()
+                .notifyTableScanCompleted(context, partition, offsetContext, totalRowsScanned, UNKNOWN_SCHEMA);
+        DebeziumException failure = new DebeziumException(message, cause);
+        if (errorHandler != null) {
+            errorHandler.setProducerThrowable(failure);
+        }
+        stopRequester.run();
+        throw failure;
     }
 
     private void warnAndSkip(MongoDbPartition partition, OffsetContext offsetContext, String formattedReason, Throwable t) {

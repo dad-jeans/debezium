@@ -8,6 +8,7 @@ package io.debezium.pipeline.source.snapshot.incremental;
 import java.util.List;
 import java.util.Map;
 
+import io.debezium.pipeline.ErrorHandler;
 import io.debezium.pipeline.signal.SignalPayload;
 import io.debezium.pipeline.signal.actions.snapshotting.SnapshotConfiguration;
 import io.debezium.pipeline.spi.OffsetContext;
@@ -32,6 +33,15 @@ public interface IncrementalSnapshotChangeEventSource<P extends Partition, T ext
     void processMessage(P partition, DataCollectionId dataCollectionId, Object key, OffsetContext offsetContext) throws InterruptedException;
 
     void init(P partition, OffsetContext offsetContext);
+
+    /**
+     * Registers the failure-handling machinery used when the connector is configured to fail on incremental
+     * snapshot errors ({@code incremental.snapshot.fail.on.error}). Called by the coordinator before the source
+     * is initialized and before any signal processing starts, so failures are fatal regardless of which thread
+     * snapshot work runs on.
+     */
+    default void setFailureHandler(ErrorHandler errorHandler, Runnable stopRequester) {
+    }
 
     void addDataCollectionNamesToSnapshot(SignalPayload<P> signalPayload, SnapshotConfiguration snapshotConfiguration)
             throws InterruptedException;

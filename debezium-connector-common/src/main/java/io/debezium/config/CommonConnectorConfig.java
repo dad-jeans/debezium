@@ -813,10 +813,12 @@ public abstract class CommonConnectorConfig {
             .withType(Type.BOOLEAN)
             .withWidth(Width.SHORT)
             .withImportance(Importance.MEDIUM)
-            .withDescription("When true, an error while reading an incremental snapshot chunk fails the connector "
-                    + "so that the snapshot resumes from the last committed chunk after a restart. "
-                    + "When false (the default), the failing table is skipped and streaming continues, "
-                    + "and the table must be re-signalled to be snapshotted again.")
+            .withDescription("When true, an error while reading an incremental snapshot chunk is treated like a streaming or initial "
+                    + "snapshot failure instead of skipping the table: it is reported through the connector's standard error handling, "
+                    + "subject to 'errors.max.retries', so a transient error causes a restart and the snapshot resumes from the last "
+                    + "committed chunk, while a persistent error surfaces as repeated restart attempts or a stopped connector. "
+                    + "When false (the default), the failing table is skipped and streaming continues; the table must be re-signalled "
+                    + "to be snapshotted again.")
             .withDefault(Boolean.FALSE);
 
     public static final Field SNAPSHOT_MODE_TABLES = Field.create("snapshot.include.collection.list")
