@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.entry;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.management.ManagementFactory;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -27,6 +28,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+
+import javax.management.MBeanServer;
+import javax.management.ObjectName;
 
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
@@ -47,6 +51,7 @@ import io.debezium.heartbeat.Heartbeat;
 import io.debezium.jdbc.JdbcConnection;
 import io.debezium.junit.EqualityCheck;
 import io.debezium.junit.SkipWhenConnectorUnderTest;
+import io.debezium.pipeline.notification.channels.LogNotificationChannel;
 import io.debezium.junit.SkipWhenConnectorUnderTest.Connector;
 import io.debezium.junit.logging.LogInterceptor;
 import io.debezium.pipeline.notification.IncrementalSnapshotNotificationService;
@@ -222,10 +227,12 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
         // Testing.Print.enable();
 
         populateTable();
+        final LogInterceptor notificationLogInterceptor = new LogInterceptor(LogNotificationChannel.class);
         final CountDownLatch engineStoppedWithError = new CountDownLatch(1);
         // retries are disabled so that the (retriable) read error fails the engine immediately
         startConnector(x -> x.with(CommonConnectorConfig.INCREMENTAL_SNAPSHOT_FAIL_ON_ERROR, true)
-                .with(CommonConnectorConfig.MAX_RETRIES_ON_ERROR, 0),
+                .with(CommonConnectorConfig.MAX_RETRIES_ON_ERROR, 0)
+                .with(CommonConnectorConfig.NOTIFICATION_ENABLED_CHANNELS, "log"),
                 (success, message, error) -> {
                     if (error != null) {
                         engineStoppedWithError.countDown();
@@ -237,6 +244,46 @@ public abstract class AbstractIncrementalSnapshotTest<T extends SourceConnector>
 
         assertThat(engineStoppedWithError.await(waitTimeForRecords() * 5L, TimeUnit.SECONDS))
                 .describedAs("Connector should fail when an incremental snapshot chunk cannot be read")
+                .isTrue();
+        assertConnectorNotRunning();
+        assertThat(notificationLogInterceptor.containsMessage("SQL_EXCEPTION"))
+                .describedAs("A failure notification should be emitted before the connector fails")
+                .isTrue();
+    }
+
+    @Test
+    public void chunkReadErrorFailsConnectorWhenSignalledOverJmxChannel() throws Exception {
+        // Testing.Print.enable();
+
+        // signals from external channels are processed on the signal-processor thread rather than the
+        // streaming thread; the failure must still stop the connector
+        populateTable();
+        final CountDownLatch engineStoppedWithError = new CountDownLatch(1);
+        startConnector(x -> x.with(CommonConnectorConfig.INCREMENTAL_SNAPSHOT_FAIL_ON_ERROR, true)
+                .with(CommonConnectorConfig.MAX_RETRIES_ON_ERROR, 0)
+                .with(CommonConnectorConfig.SIGNAL_ENABLED_CHANNELS, "source,jmx"),
+                (success, message, error) -> {
+                    if (error != null) {
+                        engineStoppedWithError.countDown();
+                    }
+                },
+                true);
+
+        final String tableId = tableDataCollectionId();
+        final String signalData = String.format(
+                "{\"type\": \"INCREMENTAL\", \"data-collections\": [\"%s\"], \"additional-conditions\": [{\"data-collection\": \"%s\", \"filter\": \"no_such_column = 1\"}]}",
+                tableId, tableId);
+
+        final MBeanServer mBeanServer = ManagementFactory.getPlatformMBeanServer();
+        Awaitility.await().atMost(waitTimeForRecords(), TimeUnit.SECONDS)
+                .until(() -> !mBeanServer.queryNames(new ObjectName("debezium.*:type=management,context=signals,*"), null).isEmpty());
+        final ObjectName signalsBean = mBeanServer.queryNames(new ObjectName("debezium.*:type=management,context=signals,*"), null).iterator().next();
+        mBeanServer.invoke(signalsBean, "signal",
+                new Object[]{ "1", "execute-snapshot", signalData },
+                new String[]{ String.class.getName(), String.class.getName(), String.class.getName() });
+
+        assertThat(engineStoppedWithError.await(waitTimeForRecords() * 5L, TimeUnit.SECONDS))
+                .describedAs("Connector should fail when an incremental snapshot chunk cannot be read, even when the signal arrived over an external channel")
                 .isTrue();
         assertConnectorNotRunning();
     }

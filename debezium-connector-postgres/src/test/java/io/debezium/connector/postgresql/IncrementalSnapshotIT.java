@@ -15,11 +15,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.source.SourceRecord;
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
@@ -35,6 +38,7 @@ import io.debezium.connector.postgresql.junit.SkipWhenDecoderPluginNameIsNot.Dec
 import io.debezium.converters.CloudEventsConverterTest;
 import io.debezium.data.VariableScaleDecimal;
 import io.debezium.doc.FixFor;
+import io.debezium.embedded.EmbeddedEngineConfig;
 import io.debezium.jdbc.JdbcConnection;
 import io.debezium.junit.SkipWhenDatabaseVersion;
 import io.debezium.kafka.KafkaClusterUtils;
@@ -631,6 +635,75 @@ public class IncrementalSnapshotIT extends AbstractIncrementalSnapshotTest<Postg
                 null);
 
         assertThat(dbChanges).contains(entry(1, 1));
+    }
+
+    @Test
+    public void incrementalSnapshotResumesFromCommittedChunkAfterReadFailure() throws Exception {
+        // Testing.Print.enable();
+
+        final int chunkSize = 10;
+        final int partialConsumption = 200;
+        populateTable();
+
+        final CountDownLatch engineStoppedWithError = new CountDownLatch(1);
+        startConnector(x -> x.with(CommonConnectorConfig.INCREMENTAL_SNAPSHOT_FAIL_ON_ERROR, true)
+                .with(CommonConnectorConfig.MAX_RETRIES_ON_ERROR, 0)
+                .with(CommonConnectorConfig.INCREMENTAL_SNAPSHOT_CHUNK_SIZE, chunkSize)
+                .with(EmbeddedEngineConfig.OFFSET_FLUSH_INTERVAL_MS, "1000"),
+                (success, message, error) -> {
+                    if (error != null) {
+                        engineStoppedWithError.countDown();
+                    }
+                },
+                true);
+
+        sendAdHocSnapshotSignal();
+        final Map<Integer, Integer> partial = consumeMixedWithIncrementalSnapshot(partialConsumption);
+        for (int i = 0; i < partialConsumption; i++) {
+            assertThat(partial).contains(entry(i + 1, i));
+        }
+        // let an offset commit land so the chunk cursor is durable
+        Thread.sleep(2500);
+
+        // kill the chunk-read connection: the next chunk read fails, and the connector must fail with it.
+        // the walsender (streaming) connection is left alone
+        Awaitility.await().atMost(waitTimeForRecords() * 10L, TimeUnit.SECONDS).until(() -> {
+            try (JdbcConnection connection = databaseConnection()) {
+                connection.execute(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()");
+            }
+            return engineStoppedWithError.getCount() == 0;
+        });
+        assertConnectorNotRunning();
+
+        stopConnector();
+
+        // restart: the snapshot must resume from the last committed chunk and complete,
+        // without re-reading the whole table. expectNoRecords is false because unconsumed
+        // records from the failed run may still be buffered
+        startConnector(x -> x.with(CommonConnectorConfig.INCREMENTAL_SNAPSHOT_FAIL_ON_ERROR, true)
+                .with(CommonConnectorConfig.MAX_RETRIES_ON_ERROR, 0)
+                .with(CommonConnectorConfig.INCREMENTAL_SNAPSHOT_CHUNK_SIZE, chunkSize),
+                (success, message, error) -> {
+                },
+                false);
+
+        final Map<Integer, Integer> dbChanges = consumeMixedWithIncrementalSnapshot(ROW_COUNT - partialConsumption);
+        // unconsumed records from the failed run may pad the count; top up one record at a time
+        // if the tail is missing
+        while (!dbChanges.containsKey(ROW_COUNT)) {
+            dbChanges.putAll(consumeMixedWithIncrementalSnapshot(1));
+        }
+        for (int i = partialConsumption; i < ROW_COUNT; i++) {
+            assertThat(dbChanges).contains(entry(i + 1, i));
+        }
+        // resume re-reads at most a couple of chunks beyond the committed cursor; a full
+        // re-read would re-emit every key
+        final int allowedOverlap = 2 * chunkSize;
+        for (int i = 0; i < partialConsumption - allowedOverlap; i++) {
+            assertThat(dbChanges).describedAs("key %s must not be re-read after restart", i + 1).doesNotContainKey(i + 1);
+        }
+        assertConnectorIsRunning();
     }
 
     protected void populate4PkTable() throws SQLException {
